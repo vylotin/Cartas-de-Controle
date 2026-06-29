@@ -171,8 +171,18 @@ else:
 # =====================================================================
 # PROVIMENTO DINÂMICO DOS PAINÉIS DE MONITORAMENTO
 # =====================================================================
+# =====================================================================
+# PROVIMENTO DINÂMICO DOS PAINÉIS DE MONITORAMENTO (EM PARES)
+# =====================================================================
 st.markdown(f"### 📍 Painel de Monitoramento Dinâmico — Unidade: {escape(aba_selecionada.upper())}")
-abas_graficos = st.tabs(list(indicadores_ativos.keys()))
+
+# 1. Defina os pares que você quer analisar lado a lado
+# O formato é: "Nome da Aba": ("Indicador U", "Indicador P")
+PARES_MONITORAMENTO = {
+    "IPCSL x CVC": ("IPCS", "CVC"),
+    "ITU-AC x CVD": ("ITU-CV", "CVD"),
+    "PAV x VM": ("PAV", "VM")
+}
 
 def aplicar_estilo_vetorizado(df_sub: pd.DataFrame) -> pd.DataFrame:
     estilos = pd.DataFrame("", index=df_sub.index, columns=df_sub.columns)
@@ -182,54 +192,88 @@ def aplicar_estilo_vetorizado(df_sub: pd.DataFrame) -> pd.DataFrame:
         estilos.loc[(df_sub["RUN"] == True) & (df_sub["OUTLIER"] == False), :] = "background-color: #fef3c7"
     return estilos
 
-for idx, (nome_ind, config) in enumerate(indicadores_ativos.items()):
-    with abas_graficos[idx]:
-        col_fase_atual = config["fase"] if config["fase"] in colunas_disponiveis else "Nenhuma"
-        
-        res: ResultadoLaney = calcular_analises_completas(
-            df_editado, col_data, config["num"], config["den"], col_fase_atual, config["tipo"], config["mult"]
-        )
-        
-        if res.df.empty:
-            st.warning("Dados insuficientes na planilha para a extração analítica deste indicador.")
-            continue
-            
-        ultimo = res.df.iloc[-1]
-        n_causas = int(res.df["CAUSA_ESPECIAL"].sum())
+# Função auxiliar para gerar e renderizar um gráfico individualmente
+def renderizar_bloco_grafico(nome_ind, config, m_col):
+    col_fase_atual = config["fase"] if config["fase"] in colunas_disponiveis else "Nenhuma"
+    res: ResultadoLaney = calcular_analises_completas(
+        df_editado, col_data, config["num"], config["den"], col_fase_atual, config["tipo"], config["mult"]
+    )
+    
+    if res.df.empty:
+        m_col.warning(f"Dados insuficientes para {nome_ind}.")
+        return
 
-        status_txt = "SURTO" if ultimo["OUTLIER"] else ("TENDÊNCIA" if ultimo["RUN"] else "ESTÁVEL")
-        data_label = ultimo[col_data].strftime("%b/%y") if isinstance(ultimo[col_data], datetime) else str(ultimo[col_data])
-        
-        # --- ALTERNÂNCIA DINÂMICA: TDI vs UTILIZAÇÃO (%) ---
-        is_u_chart = config["tipo"].upper().startswith("U")
-        label_taxa = "TDI Mês" if is_u_chart else "Utilização (%)"
-        sufixo_taxa = "" if is_u_chart else "%"
-        
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Mês Avaliado", data_label)
-        m2.metric(label_taxa, f"{ultimo['TAXA']:.2f}{sufixo_taxa}")
-        m3.metric("Status Atual", status_txt)
-        
-        if int(res.df["RUN"].sum()) > 0:
-            st.markdown('<div class="audit-banner">⚠️ <b>Atenção à Tendência (Nelson Rule 2):</b> Foram detectados pontos sequenciais contínuos no mesmo lado da média histórica.</div>', unsafe_allow_html=True)
+    ultimo = res.df.iloc[-1]
+    status_txt = "SURTO" if ultimo["OUTLIER"] else ("TENDÊNCIA" if ultimo["RUN"] else "ESTÁVEL")
+    data_label = ultimo[col_data].strftime("%b/%y") if isinstance(ultimo[col_data], datetime) else str(ultimo[col_data])
+    
+    is_u_chart = config["tipo"].upper().startswith("U")
+    label_taxa = "TDI Mês" if is_u_chart else "Utilização (%)"
+    sufixo_taxa = "" if is_u_chart else "%"
+    
+    # Métricas de topo (adaptadas para o espaço menor da coluna)
+    sm1, sm2, sm3 = m_col.columns(3)
+    sm1.metric("Mês", data_label)
+    sm2.metric(label_taxa, f"{ultimo['TAXA']:.2f}{sufixo_taxa}")
+    sm3.metric("Status", status_txt)
 
-        fig_tela = construir_figura_plotly(
-            res.df, config, nome_ind, col_data, res.fases, col_fase_atual, mostrar_rotulos, aba_selecionada
-        )
-        
-        slug_export = f"{nome_ind}_{aba_selecionada}".replace(" ", "_").replace("/", "-")
-        st.plotly_chart(fig_tela, use_container_width=False, key=f"chart_prod_{config['num']}_{idx}", config={
-            "displayModeBar": True, "modeBarButtons": [["toImage"]], "displaylogo": False,
-            "toImageButtonOptions": {"format": "png", "filename": f"CCIH_{slug_export}"}
-        })
+    if int(res.df["RUN"].sum()) > 0:
+        m_col.markdown('<div class="audit-banner">⚠️ <b>Atenção à Tendência (Rule 2)</b></div>', unsafe_allow_html=True)
 
-        with st.expander("📊 Planilha Resumida de Limites Operacionais", expanded=False):
-            cols_tabela = [c for c in [col_data, config["num"], config["den"], "TAXA", "LSC", "LIC", "OUTLIER", "RUN"] if c in res.df.columns]
-            st.dataframe(
-                res.df[cols_tabela].style.apply(aplicar_estilo_vetorizado, axis=None), 
-                use_container_width=True, 
-                height=200
-            )
+    # Gera a Figura
+    fig_tela = construir_figura_plotly(
+        res.df, config, nome_ind, col_data, res.fases, col_fase_atual, mostrar_rotulos, aba_selecionada
+    )
+    
+    slug_export = f"{nome_ind}_{aba_selecionada}".replace(" ", "_").replace("/", "-")
+    
+    # ATENÇÃO AQUI: Como estamos dentro de uma coluna de 50%, usamos use_container_width=True
+    m_col.plotly_chart(fig_tela, use_container_width=True, key=f"chart_{config['num']}_{slug_export}", config={
+        "displayModeBar": True, "modeBarButtons": [["toImage"]], "displaylogo": False,
+        "toImageButtonOptions": {"format": "png", "filename": f"CCIH_{slug_export}"}
+    })
+
+    with m_col.expander("📊 Limites", expanded=False):
+        cols_tabela = [c for c in [col_data, config["num"], config["den"], "TAXA", "LSC", "LIC", "OUTLIER", "RUN"] if c in res.df.columns]
+        st.dataframe(res.df[cols_tabela].style.apply(aplicar_estilo_vetorizado, axis=None), use_container_width=True, height=150)
+
+# 2. Cria as abas baseadas nos pares configurados
+abas_pares = st.tabs(list(PARES_MONITORAMENTO.keys()) + ["Outros Indicadores"])
+
+# 3. Itera sobre os pares e renderiza lado a lado nas abas
+indicadores_renderizados = []
+
+for idx, (titulo_aba, (ind_infec, ind_uso)) in enumerate(PARES_MONITORAMENTO.items()):
+    with abas_pares[idx]:
+        col1, col2 = st.columns(2)
+        
+        # Bloco da Esquerda (Infecção)
+        with col1:
+            if ind_infec in indicadores_ativos:
+                renderizar_bloco_grafico(ind_infec, indicadores_ativos[ind_infec], col1)
+                indicadores_renderizados.append(ind_infec)
+            else:
+                st.info(f"Indicador {ind_infec} não encontrado na planilha ativa.")
+
+        # Bloco da Direita (Utilização)
+        with col2:
+            if ind_uso in indicadores_ativos:
+                renderizar_bloco_grafico(ind_uso, indicadores_ativos[ind_uso], col2)
+                indicadores_renderizados.append(ind_uso)
+            else:
+                st.info(f"Indicador {ind_uso} não encontrado na planilha ativa.")
+
+# 4. Aba "Outros": Renderiza qualquer indicador que não estava nos pares (ex: Higiene de Mãos)
+with abas_pares[-1]:
+    indicadores_restantes = [ind for ind in indicadores_ativos.keys() if ind not in indicadores_renderizados]
+    
+    if not indicadores_restantes:
+        st.write("Todos os indicadores já foram exibidos nas abas anteriores.")
+    else:
+        for ind_extra in indicadores_restantes:
+            st.markdown(f"#### {ind_extra}")
+            renderizar_bloco_grafico(ind_extra, indicadores_ativos[ind_extra], st)
+            st.divider()
 
 # Rodapé Corporativo Estático Fixo
 st.markdown("""
