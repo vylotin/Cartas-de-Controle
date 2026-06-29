@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import os
 import zipfile
+import uuid
 from datetime import datetime
 from io import BytesIO
 from html import escape
@@ -42,6 +43,34 @@ st.markdown("""
 """, unsafe_allow_html=True)    
 
 # =====================================================================
+# MOTORES DE TRADUÇÃO DE DATA (INGLÊS -> PT-BR)
+# =====================================================================
+MESES_PT = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun', 7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
+MESES_INV = {v.lower(): k for k, v in MESES_PT.items()}
+
+def format_to_pt(date_val):
+    """Converte formato YYYY-MM-DD para string Mês/Ano (Ex: Jun/26)"""
+    if pd.isnull(date_val): return ""
+    try:
+        dt = pd.to_datetime(date_val)
+        return f"{MESES_PT[dt.month]}/{dt.strftime('%y')}"
+    except:
+        return str(date_val)
+
+def parse_from_pt(str_val):
+    """Lê a string digitada pelo usuário (Ex: Jun/26) e volta para Datetime oculto"""
+    if pd.isnull(str_val) or str_val == "": return pd.NaT
+    if isinstance(str_val, datetime): return str_val
+    try:
+        str_val = str(str_val).replace('-', '/').replace(' ', '')
+        m, y = str_val.split('/')
+        mes = MESES_INV[m.strip()[:3].lower()]
+        ano = int(y) if int(y) > 100 else int(y) + 2000
+        return pd.to_datetime(f"{ano}-{mes:02d}-01")
+    except:
+        return pd.to_datetime(str_val, errors='coerce')
+
+# =====================================================================
 # INTERFACE LATERAL: FLUXO DE DADOS
 # =====================================================================
 with st.sidebar:
@@ -59,7 +88,6 @@ with st.sidebar:
         usar_salvo = False
 
     if usar_salvo:
-        # TRATAMENTO DE ERRO: Proteção caso o Excel esteja aberto
         try:
             abas_dict, raw_bytes = ler_arquivo(ARQUIVO_SALVO)
         except PermissionError:
@@ -92,11 +120,23 @@ if df is None:
     st.stop()
 
 # =====================================================================
-# PAINEL DE ALTERAÇÃO EM TEMPO REAL (ÁREA RESTRITA)
+# PAINEL DE ALTERAÇÃO EM TEMPO REAL COM DATAS PT-BR
 # =====================================================================
+colunas_disponiveis = df.columns.tolist()
+col_data = next((c for c in colunas_disponiveis if any(k in c.lower() for k in ["data", "mes", "mês"])), colunas_disponiveis[0])
+
+# Prepara os dados para exibir "Jun/26"
+df_display = df.copy()
+df_display[col_data] = df_display[col_data].apply(format_to_pt)
+
 with st.expander("✏️ Edição de Dados em Tempo Real", expanded=False):
-    st.markdown("Modificações na tabela são refletidas nos gráficos imediatamente em tempo de execução.")
-    df_editado = st.data_editor(df, num_rows="dynamic", use_container_width=True, height=200)
+    st.markdown("Você pode editar as datas no padrão brasileiro, ex: **Jun/26**, **Fev/26**.")
+    df_editado_str = st.data_editor(df_display, num_rows="dynamic", use_container_width=True, height=200)
+
+    # Converte tudo de volta para matemática pura
+    df_editado = df_editado_str.copy()
+    df_editado[col_data] = df_editado[col_data].apply(parse_from_pt)
+    df_editado = df_editado.dropna(subset=[col_data]) 
 
     st.markdown("#### 🔒 Confirmação de Gravação (Administrador)")
     if render_login_widget():
@@ -108,13 +148,11 @@ with st.expander("✏️ Edição de Dados em Tempo Real", expanded=False):
                 st.success("✅ Arquivo atualizado em disco com sucesso.")
                 st.rerun()
             except PermissionError:
-                # TRATAMENTO DE ERRO: Caso tente salvar com ele aberto
                 st.error("❌ O arquivo está aberto no Excel. Feche-o antes de salvar.")
             except Exception as e:
                 st.error(f"❌ Falha de gravação de arquivo: {e}")
 
 colunas_disponiveis = df_editado.columns.tolist()
-col_data = next((c for c in colunas_disponiveis if any(k in c.lower() for k in ["data", "mes", "mês"])), colunas_disponiveis[0])
 
 indicadores_ativos = {
     nome: cfg for nome, cfg in CONFIG_INDICADORES.items()
@@ -126,7 +164,7 @@ if not indicadores_ativos:
     st.stop()
 
 # =====================================================================
-# MOTOR DE PREPARAÇÃO DO RELATÓRIO ZIP (OTIMIZADO - SOB DEMANDA)
+# MOTOR DE PREPARAÇÃO DO RELATÓRIO ZIP 
 # =====================================================================
 st.markdown("#### 📦 Exportação de Relatórios Clínicos")
 col_zip, col_toggle = st.columns([1, 3])
@@ -147,6 +185,11 @@ if st.session_state.get("admin_ok", False):
                             fig_virtual = construir_figura_plotly(
                                 res.df, config, nome_ind, col_data, res.fases, col_fase_atual, mostrar_rotulos, aba_selecionada
                             )
+                            # Aplica os meses em português no gráfico exportado
+                            tick_vals = res.df[col_data].tolist()
+                            tick_text = [format_to_pt(d) for d in tick_vals]
+                            fig_virtual.update_layout(xaxis=dict(tickmode='array', tickvals=tick_vals, ticktext=tick_text))
+
                             img_bytes = fig_virtual.to_image(format="png", width=2400, height=1000)
                             nome_arquivo = f"{nome_ind}_{aba_selecionada}.png".replace(" ", "_").replace("/", "-")
                             zf.writestr(nome_arquivo, img_bytes)
@@ -169,18 +212,13 @@ else:
     col_zip.info("🔒 Autentique-se como Administrador acima para liberar a exportação em massa de relatórios.")
 
 # =====================================================================
-# PROVIMENTO DINÂMICO DOS PAINÉIS DE MONITORAMENTO
-# =====================================================================
-# =====================================================================
-# PROVIMENTO DINÂMICO DOS PAINÉIS DE MONITORAMENTO (EM PARES)
+# PROVIMENTO DINÂMICO DOS PAINÉIS DE MONITORAMENTO 
 # =====================================================================
 st.markdown(f"### 📍 Painel de Monitoramento Dinâmico — Unidade: {escape(aba_selecionada.upper())}")
 
-# 1. Defina os pares que você quer analisar lado a lado
-# O formato é: "Nome da Aba": ("Indicador U", "Indicador P")
 PARES_MONITORAMENTO = {
-    "IPCSL x CVC": ("IPCS", "CVC"),
-    "ITU-AC x CVD": ("ITU-CV", "CVD"),
+    "IPCS x CVC": ("IPCS", "CVC"),
+    "ITU-CV x CVD": ("ITU-CV", "CVD"),
     "PAV x VM": ("PAV", "VM")
 }
 
@@ -192,62 +230,65 @@ def aplicar_estilo_vetorizado(df_sub: pd.DataFrame) -> pd.DataFrame:
         estilos.loc[(df_sub["RUN"] == True) & (df_sub["OUTLIER"] == False), :] = "background-color: #fef3c7"
     return estilos
 
-# Função auxiliar para gerar e renderizar um gráfico individualmente
 def renderizar_bloco_grafico(nome_ind, config, m_col):
-    col_fase_atual = config["fase"] if config["fase"] in colunas_disponiveis else "Nenhuma"
+    # 1. Garante que os dados estejam no formato correto antes de calcular
+    df_para_calculo = df_editado.copy()
+    
+    # 2. Chama o motor de cálculo
     res: ResultadoLaney = calcular_analises_completas(
-        df_editado, col_data, config["num"], config["den"], col_fase_atual, config["tipo"], config["mult"]
+        df_para_calculo, col_data, config["num"], config["den"], 
+        config["fase"] if config["fase"] in colunas_disponiveis else "Nenhuma", 
+        config["tipo"], config["mult"]
     )
     
-    if res.df.empty:
-        m_col.warning(f"Dados insuficientes para {nome_ind}.")
-        return
+    if res.df.empty: return
 
-    ultimo = res.df.iloc[-1]
-    status_txt = "SURTO" if ultimo["OUTLIER"] else ("TENDÊNCIA" if ultimo["RUN"] else "ESTÁVEL")
-    data_label = ultimo[col_data].strftime("%b/%y") if isinstance(ultimo[col_data], datetime) else str(ultimo[col_data])
+    # 1. GERAR A DATA FORMATADA EM PT-BR (Ex: Mai/26)
+    # Isso cria uma lista fixa de meses na ordem exata dos seus dados
+    meses_br = [format_to_pt(d) for d in res.df[col_data].tolist()]
     
-    is_u_chart = config["tipo"].upper().startswith("U")
-    label_taxa = "TDI Mês" if is_u_chart else "Utilização (%)"
-    sufixo_taxa = "" if is_u_chart else "%"
-    
-    # Métricas de topo (adaptadas para o espaço menor da coluna)
-    sm1, sm2, sm3 = m_col.columns(3)
-    sm1.metric("Mês", data_label)
-    sm2.metric(label_taxa, f"{ultimo['TAXA']:.2f}{sufixo_taxa}")
-    sm3.metric("Status", status_txt)
+    # 2. ADICIONAR A COLUNA DE MESES EM PT-BR NO DATAFRAME
+    res.df['mes_br'] = meses_br
 
-    if int(res.df["RUN"].sum()) > 0:
-        m_col.markdown('<div class="audit-banner">⚠️ <b>Atenção à Tendência (Rule 2)</b></div>', unsafe_allow_html=True)
-
-    # Gera a Figura
     fig_tela = construir_figura_plotly(
-        res.df, config, nome_ind, col_data, res.fases, col_fase_atual, mostrar_rotulos, aba_selecionada
+        res.df, config, nome_ind, 'mes_br', res.fases, config.get("fase"), mostrar_rotulos, aba_selecionada
     )
     
-    slug_export = f"{nome_ind}_{aba_selecionada}".replace(" ", "_").replace("/", "-")
+    # 3. FORÇAR O EIXO X A SER CATEGÓRICO E ESPAÇADO
+    # Exibe um rótulo a cada 3 meses para não poluir
+    intervalo = 3
+    ticks_limpos = [m if i % intervalo == 0 else "" for i, m in enumerate(meses_br)]
     
-    # ATENÇÃO AQUI: Como estamos dentro de uma coluna de 50%, usamos use_container_width=True
-    m_col.plotly_chart(fig_tela, use_container_width=True, key=f"chart_{config['num']}_{slug_export}", config={
-        "displayModeBar": True, "modeBarButtons": [["toImage"]], "displaylogo": False,
-        "toImageButtonOptions": {"format": "png", "filename": f"CCIH_{slug_export}"}
-    })
-
+    fig_tela.update_layout(
+        xaxis=dict(
+            type="category",
+            tickmode="array",
+            tickvals=list(range(len(meses_br))),
+            ticktext=ticks_limpos,
+            showgrid=False,
+            linecolor="gray",
+            mirror=True
+        ),
+        margin=dict(l=50, r=50, t=50, b=80) # Respiro no fundo para as datas
+    )
+    
+    # ... resto do código (uuid, plotly_chart, expander) ...
+    slug_export = f"{nome_ind}_{aba_selecionada}".replace(" ", "_").replace("/", "-")
+    chave_unica = uuid.uuid4().hex[:8] 
+    
+    m_col.plotly_chart(fig_tela, use_container_width=True, key=f"chart_{config['num']}_{slug_export}_{chave_unica}")
+    
     with m_col.expander("📊 Limites", expanded=False):
-        cols_tabela = [c for c in [col_data, config["num"], config["den"], "TAXA", "LSC", "LIC", "OUTLIER", "RUN"] if c in res.df.columns]
-        st.dataframe(res.df[cols_tabela].style.apply(aplicar_estilo_vetorizado, axis=None), use_container_width=True, height=150)
+        st.dataframe(res.df.style.apply(aplicar_estilo_vetorizado, axis=None), use_container_width=True, height=150)
 
-# 2. Cria as abas baseadas nos pares configurados
+# Criar abas principais
 abas_pares = st.tabs(list(PARES_MONITORAMENTO.keys()) + ["Outros Indicadores"])
-
-# 3. Itera sobre os pares e renderiza lado a lado nas abas
 indicadores_renderizados = []
 
 for idx, (titulo_aba, (ind_infec, ind_uso)) in enumerate(PARES_MONITORAMENTO.items()):
     with abas_pares[idx]:
         col1, col2 = st.columns(2)
         
-        # Bloco da Esquerda (Infecção)
         with col1:
             if ind_infec in indicadores_ativos:
                 renderizar_bloco_grafico(ind_infec, indicadores_ativos[ind_infec], col1)
@@ -255,7 +296,6 @@ for idx, (titulo_aba, (ind_infec, ind_uso)) in enumerate(PARES_MONITORAMENTO.ite
             else:
                 st.info(f"Indicador {ind_infec} não encontrado na planilha ativa.")
 
-        # Bloco da Direita (Utilização)
         with col2:
             if ind_uso in indicadores_ativos:
                 renderizar_bloco_grafico(ind_uso, indicadores_ativos[ind_uso], col2)
@@ -263,7 +303,60 @@ for idx, (titulo_aba, (ind_infec, ind_uso)) in enumerate(PARES_MONITORAMENTO.ite
             else:
                 st.info(f"Indicador {ind_uso} não encontrado na planilha ativa.")
 
-# 4. Aba "Outros": Renderiza qualquer indicador que não estava nos pares (ex: Higiene de Mãos)
+        # =========================================================
+        # TABELA RESUMO HORIZONTAL
+        # =========================================================
+        if ind_infec in indicadores_ativos and ind_uso in indicadores_ativos:
+            st.markdown("---")
+            
+            col_num_infec = indicadores_ativos[ind_infec]["num"]
+            col_num_uso = indicadores_ativos[ind_uso]["num"]
+            mult_infec = indicadores_ativos[ind_infec]["mult"]
+            is_u_chart = indicadores_ativos[ind_infec]["tipo"].upper().startswith("U")
+            label_taxa = "TDI" if is_u_chart else "Taxa (%)"
+            
+            df_temp = df_editado.copy()
+            df_temp[col_data] = pd.to_datetime(df_temp[col_data])
+            
+            nome_unidade = escape(aba_selecionada.upper())
+            col_headers = [nome_unidade, "2025"]
+            row_infec = [f"N {col_num_infec}"] 
+            row_uso = [f"{col_num_uso}"]       
+            row_taxa = [label_taxa]            
+            
+            df_2025 = df_temp[df_temp[col_data].dt.year == 2025]
+            soma_infec_2025 = df_2025[col_num_infec].sum() if not df_2025.empty else 0
+            soma_uso_2025 = df_2025[col_num_uso].sum() if not df_2025.empty else 0
+            taxa_2025 = (soma_infec_2025 / soma_uso_2025 * mult_infec) if soma_uso_2025 > 0 else 0
+            
+            row_infec.append(int(soma_infec_2025))
+            row_uso.append(int(soma_uso_2025))
+            row_taxa.append(f"{taxa_2025:.2f}".replace(".", ",")) 
+            
+            df_2026 = df_temp[df_temp[col_data].dt.year == 2026].copy()
+            if not df_2026.empty:
+                # Usa a mesma tradução robusta para a tabela resumo
+                df_2026["Mês_Rotulo"] = df_2026[col_data].apply(format_to_pt)
+                
+                df_2026_grp = df_2026.groupby(df_2026[col_data].dt.month).agg({
+                    "Mês_Rotulo": "first",
+                    col_num_infec: "sum",
+                    col_num_uso: "sum"
+                }).sort_index()
+                
+                for _, row in df_2026_grp.iterrows():
+                    col_headers.append(row["Mês_Rotulo"])
+                    n_inf = row[col_num_infec]
+                    n_uso = row[col_num_uso]
+                    taxa = (n_inf / n_uso * mult_infec) if n_uso > 0 else 0
+                    
+                    row_infec.append(int(n_inf))
+                    row_uso.append(int(n_uso))
+                    row_taxa.append(f"{taxa:.2f}".replace(".", ","))
+            
+            tabela_resumo = pd.DataFrame([row_infec, row_uso, row_taxa], columns=col_headers)
+            st.dataframe(tabela_resumo, use_container_width=True, hide_index=True)
+
 with abas_pares[-1]:
     indicadores_restantes = [ind for ind in indicadores_ativos.keys() if ind not in indicadores_renderizados]
     
@@ -275,7 +368,6 @@ with abas_pares[-1]:
             renderizar_bloco_grafico(ind_extra, indicadores_ativos[ind_extra], st)
             st.divider()
 
-# Rodapé Corporativo Estático Fixo
 st.markdown("""
     <div style="text-align: center; padding: 20px; color: #475569; font-size: 0.75rem; border-top: 1px solid rgba(0,0,0,0.05); margin-top: 40px;">
         Controle de Infecção Hospitalar | CIDS | SCIH | HUGO

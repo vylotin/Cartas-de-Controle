@@ -14,7 +14,7 @@ def construir_figura_plotly(df_calc: pd.DataFrame, config: dict, nome_ind: str, 
     
     ultimo_global = df_calc.iloc[-1]
     df_calc = df_calc.copy()
-    df_calc[col_data] = pd.to_datetime(df_calc[col_data])
+   #APAGUEI  df_calc[col_data] = pd.to_datetime(df_calc[col_data])#
 
     fases_coords = []
     for fase in fases:
